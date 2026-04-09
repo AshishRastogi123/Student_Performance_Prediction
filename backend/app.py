@@ -1,193 +1,199 @@
 from flask import Flask, render_template, request, jsonify
-import numpy as np
 import pandas as pd
-import pickle
 import os
+import joblib
+import traceback
+import sys
 
 app = Flask(__name__)
 
-# Load model
-MODEL_PATH = os.path.join("ml_model", "student.pkl")
+# Force immediate prints
+sys.stdout.flush()
 
-with open(MODEL_PATH, "rb") as f:
-    model = pickle.load(f)
+print("🚀 Flask app starting...", flush=True)
 
+# ========= LOAD MODEL =========
+MODEL_PATH = os.path.join("ml_model", "students.pkl")
+try:
+    model = joblib.load(MODEL_PATH)
+    print("✅ Model loaded:", type(model).__name__, flush=True)
+    print("📊 Model features expected:", getattr(model, 'n_features_in_', 'NA'), flush=True)
+    if hasattr(model, 'feature_names_in_'):
+        print("📋 Feature names:", list(model.feature_names_in_), flush=True)
+except Exception as e:
+    print("❌ Model load failed:", str(e), flush=True)
+    traceback.print_exc()
+    model = None
 
+# ========= GLOBAL BEFORE REQUEST =========
+@app.before_request
+def log_request():
+    print(f"\n📨 GLOBAL REQUEST: {request.method} {request.path}", flush=True)
+    if request.form:
+        print(f"📄 request.form: {dict(request.form)}", flush=True)
+    print(f"🌐 Content-Type: {request.content_type}", flush=True)
+    if request.is_json:
+        print(f"📄 request.json: {request.json}", flush=True)
+    sys.stdout.flush()
+
+# ========= GLOBAL ERROR HANDLER =========
+@app.errorhandler(Exception)
+def handle_error(error):
+    print("🚨 GLOBAL ERROR:", type(error).__name__, flush=True)
+    print("💥 Error message:", str(error), flush=True)
+    traceback.print_exc()
+    sys.stdout.flush()
+    
+    return jsonify({
+        "success": False,
+        "error": str(error),
+        "traceback": traceback.format_exc()
+    }), 500
+
+# ========= HOME =========
 @app.route("/")
 def home():
+    print("🏠 Home route hit", flush=True)
     return render_template("index.html")
 
+# ========= FAVICON =========
+@app.route('/favicon.ico')
+def favicon():
+    return '', 404
 
+# ========= TEST ROUTE =========
+@app.route("/test", methods=["GET"])
+def test():
+    print("🧪 TEST ROUTE - SERVER WORKING ✅", flush=True)
+    sys.stdout.flush()
+    return jsonify({"status": "SERVER WORKING", "message": "All good!"})
+
+# ========= PREDICT =========
 @app.route("/predict", methods=["POST"])
 def predict():
+    print("\n🎯 API HIT - /predict called!", flush=True)
+    
     try:
-        # Validate and get numeric inputs
-        age = request.form.get("age")
-        gender = request.form.get("gender")
-        study_hours = request.form.get("study_hours")
-        attendance = request.form.get("attendance")
-        internet = request.form.get("internet")
-        sleep_hours = request.form.get("sleep_hours")
-        sleep_quality = request.form.get("sleep_quality")
-        facility = request.form.get("facility")
-        exam_diff = request.form.get("exam_diff")
-        course = request.form.get("course")
-        method = request.form.get("method")
+        # ===== STEP 1: LOG ALL INCOMING DATA =====
+        print("📥 All form data:", dict(request.form), flush=True)
+        data = {k: request.form.get(k, '').strip() for k in [
+            "age", "gender", "study_hours", "attendance", "internet", 
+            "sleep_hours", "sleep_quality", "facility", "exam_diff", 
+            "course", "method"
+        ]}
+        print("🔍 Parsed data:", data, flush=True)
 
-        # Check for missing fields
-        if not all([age, gender, study_hours, attendance, internet, sleep_hours, sleep_quality, facility, exam_diff, course, method]):
-            return jsonify({
-                "success": False,
-                "error": "All fields are required"
-            }), 400
+        # Validate
+        missing = [k for k, v in data.items() if not v]
+        if missing:
+            error = f"Missing fields: {missing}"
+            print(f"❌ Validation error: {error}", flush=True)
+            return jsonify({"success": False, "error": error}), 400
 
-        # Convert to appropriate types
-        age = float(age)
-        gender = int(gender)
-        study_hours = float(study_hours)
-        attendance = float(attendance)
-        internet = int(internet)
-        sleep_hours = float(sleep_hours)
-        sleep_quality = float(sleep_quality)
-        facility = float(facility)
-        exam_diff = float(exam_diff)
-        course = course.lower().strip()
-        method = method.lower().strip()
+        # ===== STEP 2: NUMERIC TRANSFORM =====
+        numeric_map = {
+            "age": float(data["age"]),
+            "study_hours": float(data["study_hours"]),
+            "attendance": float(data["attendance"]),
+            "internet": int(data["internet"]),
+            "sleep_hours": float(data["sleep_hours"]),
+            "sleep_quality": int(data["sleep_quality"]),
+            "facility": int(data["facility"]),
+            "exam_diff": int(data["exam_diff"])
+        }
+        print("🔢 Numeric features:", numeric_map, flush=True)
 
-        # One Hot Encoding
-        courses = ["b.com","b.sc","b.tech","ba","bba","bca","diploma"]
-        study_methods = ["coaching","group study","mixed","online videos","self-study"]
+        # ===== STEP 3: GENDER ONE-HOT =====
+        g = data["gender"].lower()
+        gender_features = {
+            "gender_female": 1 if g in ["1", "female"] else 0,
+            "gender_male": 1 if g in ["0", "male"] else 0,
+            "gender_other": 1 if g in ["2", "other"] else 0
+        }
+        print("⚧️ Gender one-hot:", gender_features, flush=True)
 
-        course_encoded = [1 if course == c else 0 for c in courses]
-        method_encoded = [1 if method == m else 0 for m in study_methods]
+        # ===== STEP 4: COURSE ONE-HOT =====
+        courses = ["b.com", "b.sc", "b.tech", "ba", "bba", "bca", "diploma"]
+        course_features = {f"course_{c}": 1 if data["course"].lower() == c else 0 for c in courses}
+        print("📚 Course one-hot:", course_features, flush=True)
 
-        # Combine features
-        features = [
-            age, gender, study_hours, attendance, internet,
-            sleep_hours, sleep_quality, facility, exam_diff
-        ]
+        # ===== STEP 5: METHOD ONE-HOT =====
+        methods = ["coaching", "group study", "mixed", "online videos", "self-study"]
+        method_features = {f"study_method_{m.replace(' ', '_')}": 1 if data["method"].lower() == m else 0 for m in methods}
+        print("📖 Method one-hot:", method_features, flush=True)
 
-        # Debug: Print model's expected feature names
-        print("Model's expected feature names:")
-        if hasattr(model, 'feature_names_in_'):
-            print(model.feature_names_in_)
+        # ===== STEP 6: FINAL FEATURE DICT =====
+        input_dict = {
+            "age": numeric_map["age"],
+            "study_hours": numeric_map["study_hours"],
+            "class_attendance": numeric_map["attendance"],
+            "internet_access": numeric_map["internet"],
+            "sleep_hours": numeric_map["sleep_hours"],
+            "sleep_quality": numeric_map["sleep_quality"],
+            "facility_rating": numeric_map["facility"],
+            "exam_difficulty": numeric_map["exam_diff"],
+            **gender_features, **course_features, **method_features
+        }
+        print("🏗️ Final input dict keys:", list(input_dict.keys()), flush=True)
+        print("📐 Input dict shape (len):", len(input_dict), flush=True)
+
+        # ===== STEP 7: CREATE DATAFRAME =====
+        df = pd.DataFrame([input_dict])
+        print("📊 Initial DF shape:", df.shape, flush=True)
+        print("📋 Initial DF columns:", list(df.columns), flush=True)
+
+        # ===== STEP 8: ALIGN WITH MODEL FEATURES =====
+        if model and hasattr(model, 'feature_names_in_'):
+            expected_cols = model.feature_names_in_
+            print(f"🎯 Model expects {len(expected_cols)} features: {list(expected_cols)}", flush=True)
+            df = df.reindex(columns=expected_cols, fill_value=0)
+            print("✅ Aligned DF shape:", df.shape, flush=True)
+            print("📋 Final columns:", list(df.columns), flush=True)
         else:
-            print("No feature names found in model")
+            print("⚠️ No feature_names_in_, using raw DF", flush=True)
 
-        # Create feature names to match model EXACTLY
-        feature_names = [
-            'age', 'gender', 'study_hours', 'class_attendance', 'internet_access',
-            'sleep_hours', 'sleep_quality', 'facility_rating', 'exam_difficulty',
-            'course_b.com', 'course_b.sc', 'course_b.tech', 'course_ba', 'course_bba', 'course_bca', 'course_diploma',
-            'study_method_coaching', 'study_method_group study', 'study_method_mixed', 'study_method_online videos', 'study_method_self-study'
-        ]
+        sys.stdout.flush()
 
-        # Create numpy array
-        final_features_array = np.array(features + course_encoded + method_encoded).reshape(1, -1)
+        # ===== STEP 9: MODEL PREDICTION =====
+        if not model:
+            raise ValueError("Model not loaded")
+            
+        pred = model.predict(df)
+        print("🔮 Raw prediction:", pred, flush=True)
         
-        # Convert to DataFrame with feature names
-        final_features = pd.DataFrame(final_features_array, columns=feature_names)
+        label = int(pred[0])
+        mapping = {0: "Poor", 1: "Average", 2: "Excellent"}
+        performance = mapping.get(label, "Unknown")
 
-        # Debug: Print feature shape and values
-        print(f"Feature shape: {final_features.shape}")
-        print(f"Features:\n{final_features}")
-        print(f"Model expected features: {getattr(model, 'n_features_in_', 'Unknown')}")
-
-        # Prediction (0=FAIL, 1=PASS)
-        print("Making prediction...")
+        # ===== STEP 10: PROBABILITIES =====
         try:
-            prediction_result = model.predict(final_features)
-            print(f"Prediction result: {prediction_result}, type: {type(prediction_result)}")
-            
-            # Model returns string categories directly
-            performance = prediction_result[0]
-            print(f"Performance category: {performance}")
-            
-            # Map performance string to category number
-            performance_to_category = {
-                "Excellent": 0,
-                "Good": 1,
-                "Average": 2,
-                "Poor": 3
-            }
-            
-            category = performance_to_category.get(performance, 0)
-            print(f"Category number: {category}")
-            
-        except Exception as pred_error:
-            print(f"ERROR in prediction: {pred_error}")
-            print(f"Error type: {type(pred_error)}")
-            raise pred_error
+            probs = model.predict_proba(df)[0]
+            print("📈 Probabilities:", probs.tolist(), flush=True)
+            confidence = max(probs) * 100
+        except:
+            print("⚠️ No predict_proba available", flush=True)
+            confidence = 0
 
-        # Get probability/confidence
-        print("Getting probabilities...")
-        try:
-            probabilities = model.predict_proba(final_features)[0]
-            print(f"Probabilities: {probabilities}")
-            confidence = float(max(probabilities)) * 100
-            print(f"Confidence: {confidence}")
-        except Exception as prob_error:
-            print(f"Error getting probabilities: {prob_error}")
-            confidence = 0.0
+        print(f"🎉 FINAL RESULT: {performance} (confidence: {confidence:.2f}%)", flush=True)
+        sys.stdout.flush()
 
-        # Determine prediction result message
-        if performance == "Excellent":
-            result = "Student Performance is Excellent"
-        elif performance == "Good":
-            result = "Student Performance is Good"
-        elif performance == "Average":
-            result = "Student Performance is Average"
-        else:  # Poor
-            result = "Student Performance is Poor"
-        
-        print(f"Result: {result}")
-        print(f"Category: {category}")
-
-        # Performance and emoji mapping
-        performance_map = {
-            0: "Excellent",
-            1: "Good",
-            2: "Average",
-            3: "Poor"
-        }
-
-        emojis = {
-            0: "⭐",
-            1: "😊",
-            2: "👍",
-            3: "⚠️"
-        }
-
-        response = {
+        return jsonify({
             "success": True,
-            "prediction": result,
-            "performance": performance_map[category],
+            "prediction": performance,
             "confidence": round(confidence, 2),
-            "emoji": emojis[category],
-            "category": category
-        }
-        
-        print(f"Response: {response}")
-        return jsonify(response)
+            "label": label,
+            "probs": probs.tolist() if 'probs' in locals() else None
+        })
 
-    except ValueError as e:
-        return jsonify({
-            "success": False,
-            "error": f"Invalid input format: {str(e)}"
-        }), 400
     except Exception as e:
-        error_msg = str(e)
-        # Check for feature mismatch
-        if "n_features" in error_msg or "feature" in error_msg:
-            return jsonify({
-                "success": False,
-                "error": f"Model feature mismatch: {error_msg}. Please check that the model expects the correct number of features."
-            }), 400
-        return jsonify({
-            "success": False,
-            "error": error_msg
-        }), 400
+        print("🚨 PREDICT ERROR:", type(e).__name__, flush=True)
+        print("💥 Error details:", str(e), flush=True)
+        traceback.print_exc()
+        sys.stdout.flush()
+        return jsonify({"success": False, "error": str(e)}), 400
 
-
+# ========= RUN SERVER =========
 if __name__ == "__main__":
-    app.run(debug=True)
+    print("🌐 Starting Flask server in DEBUG mode...", flush=True)
+    app.run(debug=True, host='0.0.0.0', port=5000)
+    sys.stdout.flush()
